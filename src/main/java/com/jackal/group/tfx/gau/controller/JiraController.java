@@ -5,6 +5,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.jackal.group.tfx.gau.event.CacheEvent;
 import com.jackal.group.tfx.gau.event.CacheEventService;
 import com.jackal.group.tfx.gau.event.MessagePublisher;
+import com.jackal.group.tfx.gau.service.JiraProcessingService;
 import com.jackal.group.tfx.gau.util.CacheUtil;
 import com.jackal.group.tfx.gau.util.HttpUtil;
 import io.micrometer.common.util.StringUtils;
@@ -26,7 +27,7 @@ public class JiraController {
     private final ObjectMapper objectMapper;
     private final CacheEventService cacheEventService;
     private final MessagePublisher messagePublisher;
-    private final JiraMarkdownController jiraMarkdownController;
+    private final JiraProcessingService jiraProcessingService;
 
     @PostMapping(value = "/jira/jql", consumes = {"application/json", "text/plain"})
     public ResponseEntity searchJira(@RequestBody String body, 
@@ -39,6 +40,19 @@ public class JiraController {
             if (useCache != null && useCache) {
                 var cachedResult = cacheEventService.tryCache(cacheKey);
                 if (StringUtils.isNotBlank(cachedResult)) {
+                    // 如果缓存结果存在且需要转换为Markdown
+                    if (toMarkdown != null && toMarkdown) {
+                        try {
+                            String markdownContent = jiraProcessingService.convertToMarkdown(cachedResult);
+                            if (markdownContent != null) {
+                                return ResponseEntity.ok(markdownContent);
+                            } else {
+                                log.warn("转换缓存结果为Markdown失败，返回原始JSON");
+                            }
+                        } catch (JsonProcessingException e) {
+                            log.warn("转换缓存结果为Markdown失败，返回原始JSON: {}", e.getMessage());
+                        }
+                    }
                     return ResponseEntity.ok(cachedResult);
                 }
             }
@@ -49,7 +63,7 @@ public class JiraController {
             var url = "%s/rest/api/%s/search".formatted(req.apiPrefix, req.apiVersion);
             var resp = HttpUtil.post(req.jql,
                 Map.of("Authorization", "Bearer %s".formatted(req.token),
-                       "Content-Type", "application/json")
+                       "Content-Type", "application/json"),
                 url);
             if (HttpUtil.is2xxSuccessful(resp)) {
                 String responseBody = resp.body();
@@ -57,8 +71,13 @@ public class JiraController {
                 // 如果需要转换为Markdown格式
                 if (toMarkdown != null && toMarkdown) {
                     try {
-                        boolean success = jiraMarkdownController.convertToMarkdown(responseBody);
-                        if (!success) {
+                        String markdownContent = jiraProcessingService.convertToMarkdown(responseBody);
+                        if (markdownContent != null) {
+                            // 缓存原始JSON响应
+                            messagePublisher.publishMessage(CacheEvent.builder().key(cacheKey).rawKey(rawKey).details(responseBody).build());
+                            // 返回Markdown内容
+                            return ResponseEntity.ok(markdownContent);
+                        } else {
                             log.warn("转换为Markdown失败，返回原始JSON");
                         }
                     } catch (JsonProcessingException e) {
@@ -89,6 +108,19 @@ public class JiraController {
             if (useCache != null && useCache) {
                 var cachedResult = cacheEventService.tryCache(cacheKey);
                 if (StringUtils.isNotBlank(cachedResult)) {
+                    // 如果缓存结果存在且需要转换为Markdown
+                    if (toMarkdown != null && toMarkdown) {
+                        try {
+                            String markdownContent = jiraProcessingService.convertToMarkdown(cachedResult);
+                            if (markdownContent != null) {
+                                return ResponseEntity.ok(markdownContent);
+                            } else {
+                                log.warn("转换缓存结果为Markdown失败，返回原始JSON");
+                            }
+                        } catch (JsonProcessingException e) {
+                            log.warn("转换缓存结果为Markdown失败，返回原始JSON: {}", e.getMessage());
+                        }
+                    }
                     return ResponseEntity.ok(cachedResult);
                 }
             }
@@ -102,8 +134,13 @@ public class JiraController {
                 // 如果需要转换为Markdown格式
                 if (toMarkdown != null && toMarkdown) {
                     try {
-                        boolean success = jiraMarkdownController.convertToMarkdown(responseBody);
-                        if (!success) {
+                        String markdownContent = jiraProcessingService.convertToMarkdown(responseBody);
+                        if (markdownContent != null) {
+                            // 缓存原始JSON响应
+                            messagePublisher.publishMessage(CacheEvent.builder().key(cacheKey).rawKey(rawKey).details(responseBody).build());
+                            // 返回Markdown内容
+                            return ResponseEntity.ok(markdownContent);
+                        } else {
                             log.warn("转换为Markdown失败，返回原始JSON");
                         }
                     } catch (JsonProcessingException e) {
