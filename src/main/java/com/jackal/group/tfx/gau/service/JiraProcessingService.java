@@ -3,13 +3,23 @@ package com.jackal.group.tfx.gau.service;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.jackal.group.tfx.gau.controller.JiraMarkdownController;
+import com.jackal.group.tfx.gau.enums.SourceType;
+import com.jackal.group.tfx.gau.pojo.BaseUploadBean;
+import com.jackal.group.tfx.gau.pojo.S3FileMetaData;
 import lombok.Data;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.context.annotation.Lazy;
+import org.springframework.http.ResponseEntity;
+import org.springframework.scheduling.annotation.Async;
 import org.springframework.stereotype.Service;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.UUID;
+import java.util.concurrent.CompletableFuture;
 import java.util.stream.Collectors;
 
 /**
@@ -22,6 +32,14 @@ import java.util.stream.Collectors;
 public class JiraProcessingService {
     
     private final ObjectMapper objectMapper;
+    
+    @Autowired
+    @Lazy
+    private JiraMarkdownController jiraMarkdownController;
+    
+    @Autowired
+    @Lazy
+    private S3Service s3Service;
     
     /**
      * 将Jira API返回的JSON字符串转换为Markdown格式
@@ -85,6 +103,7 @@ public class JiraProcessingService {
     
     /**
      * 处理任务数据并返回Markdown内容
+     * 根据issues数量决定处理方式
      * 
      * @param jsonResult JSON根节点
      * @return Markdown内容字符串，处理失败时返回null
@@ -92,13 +111,39 @@ public class JiraProcessingService {
     private String procTaskAndReturnMarkdown(JsonNode jsonResult) {
         try {
             JsonNode issuesNode = jsonResult.get("issues");
-            if (issuesNode == null || !issuesNode.isArray() || issuesNode.size() == 0) {
-                log.warn("issues数组为空或不存在");
+            if (issuesNode == null || !issuesNode.isArray()) {
+                log.warn("issues数组不存在或格式错误");
                 return null;
             }
             
-            // 获取主任务（第一个issue）
+            int issueCount = issuesNode.size();
+            if (issueCount == 0) {
+                log.warn("issues数组为空");
+                return null;
+            }
+            
+            if (issueCount == 1) {
+                // 单个任务：按原有逻辑处理（兼容/jira/markdown接口）
+                return processSingleTask(jsonResult);
+            } else {
+                // 多个任务：每个任务都生成完整的Markdown
+                return processMultipleTasks(issuesNode);
+            }
+            
+        } catch (Exception e) {
+            log.error("处理任务失败: {}", e.getMessage(), e);
+            return null;
+        }
+    }
+    
+    /**
+     * 处理单个任务（原有逻辑，保持兼容性）
+     */
+    private String processSingleTask(JsonNode jsonResult) {
+        try {
+            JsonNode issuesNode = jsonResult.get("issues");
             JsonNode mainTask = issuesNode.get(0);
+            
             if (mainTask == null || mainTask.isNull()) {
                 log.warn("主任务不存在或为null");
                 return null;
@@ -124,12 +169,85 @@ public class JiraProcessingService {
             // 生成并返回Markdown内容
             String markdownContent = createMarkdownFile(taskInfo, attachList, subTaskList);
             
-            log.info("成功转换任务: {} 为Markdown格式", fileName);
+            log.info("成功转换单个任务: {} 为Markdown格式", fileName);
             
             return markdownContent;
             
         } catch (Exception e) {
-            log.error("处理任务失败: {}", e.getMessage(), e);
+            log.error("处理单个任务失败: {}", e.getMessage(), e);
+            return null;
+        }
+    }
+    
+    /**
+     * 处理多个任务，每个任务生成完整的Markdown
+     */
+    private String processMultipleTasks(JsonNode issuesNode) {
+        StringBuilder allMarkdownContent = new StringBuilder();
+        List<BaseUploadBean> s3UploadBeans = new ArrayList<>();
+        
+        try {
+            for (int i = 0; i < issuesNode.size(); i++) {
+                JsonNode currentTask = issuesNode.get(i);
+                if (currentTask == null || currentTask.isNull()) {
+                    log.warn("跳过第{}个空任务", i);
+                    continue;
+                }
+                
+                JsonNode fields = currentTask.get("fields");
+                if (fields == null || fields.isNull()) {
+                    log.warn("第{}个任务的fields字段不存在，跳过", i);
+                    continue;
+                }
+                
+                String taskKey = getTextValue(currentTask, "key");
+                log.info("开始处理任务: {}", taskKey);
+                
+                try {
+                    // 1. 创建当前任务信息
+                    TaskInfo taskInfo = createTaskInfo(fields);
+                    
+                    // 2. 创建附件列表
+                    List<AttachmentInfo> attachList = createAttachmentList(fields);
+                    
+                    // 3. 获取子任务信息（调用/jira/subInfo接口）
+                    List<SubTaskInfo> subTaskList = getSubTasksFromApi(taskKey);
+                    
+                    // 4. 生成当前任务的Markdown内容
+                    String taskMarkdown = createMarkdownFileForSingleTask(taskInfo, attachList, subTaskList);
+                    
+                    // 5. 准备S3上传数据
+                    BaseUploadBean uploadBean = createS3UploadBean(taskInfo, taskMarkdown, taskKey);
+                    s3UploadBeans.add(uploadBean);
+                    
+                    // 6. 添加到总的Markdown内容中
+                    if (i > 0) {
+                        allMarkdownContent.append("\n\n---\n\n"); // 任务之间的分隔符
+                    }
+                    allMarkdownContent.append(taskMarkdown);
+                    
+                    log.info("成功处理任务: {}", taskKey);
+                    
+                } catch (Exception e) {
+                    log.error("处理任务 {} 时发生异常: {}", taskKey, e.getMessage(), e);
+                    // 添加错误信息到Markdown中
+                    if (i > 0) {
+                        allMarkdownContent.append("\n\n---\n\n");
+                    }
+                    allMarkdownContent.append(String.format("# Error\n处理任务 %s 时发生异常: %s\n", taskKey, e.getMessage()));
+                }
+            }
+            
+            // 异步推送到S3
+            if (!s3UploadBeans.isEmpty()) {
+                asyncPushToS3(s3UploadBeans);
+            }
+            
+            log.info("成功处理 {} 个任务的Markdown转换", issuesNode.size());
+            return allMarkdownContent.toString();
+            
+        } catch (Exception e) {
+            log.error("处理多个任务失败: {}", e.getMessage(), e);
             return null;
         }
     }
@@ -180,6 +298,99 @@ public class JiraProcessingService {
             log.error("处理任务失败: {}", e.getMessage(), e);
             return null;
         }
+    }
+    
+    /**
+     * 通过API获取指定任务的子任务信息
+     */
+    private List<SubTaskInfo> getSubTasksFromApi(String parentTaskKey) {
+        List<SubTaskInfo> subTaskList = new ArrayList<>();
+        
+        try {
+            // 构造请求对象 - 这里需要根据实际情况设置jiraSource和jiraToken
+            // 由于无法直接获取这些信息，暂时返回空列表
+            // TODO: 需要找到合适的方式传递jiraSource和jiraToken
+            log.warn("暂时无法获取任务 {} 的子任务信息，需要传递jiraSource和jiraToken", parentTaskKey);
+            
+            /* 
+            // 理想情况下的实现：
+            JiraMarkdownController.JiraSubInfoRequest request = new JiraMarkdownController.JiraSubInfoRequest();
+            request.setJira_key(parentTaskKey);
+            request.setJiraSource(jiraSource); // 需要传入
+            request.setJiraToken(jiraToken);   // 需要传入
+            
+            ResponseEntity<List<JiraMarkdownController.SubTaskResult>> response = 
+                jiraMarkdownController.getSubTaskInfo(request);
+            
+            if (response.getStatusCode().is2xxSuccessful() && response.getBody() != null) {
+                for (JiraMarkdownController.SubTaskResult subTaskResult : response.getBody()) {
+                    SubTaskInfo subTask = new SubTaskInfo();
+                    subTask.setKey(subTaskResult.getKey());
+                    subTask.setSummary(subTaskResult.getSummary());
+                    subTask.setUrl(""); // API没有返回URL信息
+                    subTaskList.add(subTask);
+                }
+            }
+            */
+            
+        } catch (Exception e) {
+            log.error("获取任务 {} 的子任务信息失败: {}", parentTaskKey, e.getMessage(), e);
+        }
+        
+        return subTaskList;
+    }
+    
+    /**
+     * 为单个任务创建Markdown内容
+     */
+    private String createMarkdownFileForSingleTask(TaskInfo taskInfo, List<AttachmentInfo> attachList, List<SubTaskInfo> subTaskList) {
+        StringBuilder markdown = new StringBuilder();
+        
+        // 1. 当前任务信息
+        markdown.append("# Summary\n")
+                .append(safeguardString(taskInfo.getSummary())).append("\n")
+                .append("## Description\n")
+                .append(safeguardString(taskInfo.getDescription())).append("\n")
+                .append("## Task Info\n")
+                .append("* Status: ").append(safeguardString(taskInfo.getStatus())).append("\n")
+                .append("* Updated: ").append(safeguardString(taskInfo.getUpdated())).append("\n")
+                .append("* Issuetype: ").append(safeguardString(taskInfo.getIssuetype())).append("\n")
+                .append("## Labels\n")
+                .append(safeguardString(taskInfo.getLabels())).append("\n")
+                .append("## Market Affected Field Name\n")
+                .append(safeguardString(taskInfo.getMarketAffectedFieldName())).append("\n")
+                .append("## Acceptance Criteria Field Name\n")
+                .append(safeguardString(taskInfo.getAcceptanceCriteriaFieldName())).append("\n");
+        
+        // 2. 附件信息
+        if (attachList != null && !attachList.isEmpty()) {
+            markdown.append("## Attachment\n");
+            for (AttachmentInfo attach : attachList) {
+                if (attach != null) {
+                    markdown.append(safeguardString(attach.getFileName())).append("\n")
+                            .append("* ID: ").append(safeguardString(attach.getFileId())).append("\n")
+                            .append("* Created: ").append(safeguardString(attach.getCreated())).append("\n")
+                            .append("* File Size: ").append(safeguardString(attach.getSize())).append("\n")
+                            .append("* Download URL: ").append(safeguardString(attach.getUrl())).append("\n")
+                            .append("---\n");
+                }
+            }
+        }
+        
+        // 3. 子任务信息
+        if (subTaskList != null && !subTaskList.isEmpty()) {
+            markdown.append("## Sub Tasks\n");
+            for (SubTaskInfo subTask : subTaskList) {
+                if (subTask != null) {
+                    markdown.append(safeguardString(subTask.getSummary())).append("\n")
+                            .append("* Key: ").append(safeguardString(subTask.getKey())).append("\n")
+                            .append("* URL: ").append(safeguardString(subTask.getUrl())).append("\n")
+                            .append("---\n");
+                }
+            }
+        }
+        
+        return markdown.toString();
     }
     
     /**
@@ -444,6 +655,59 @@ public class JiraProcessingService {
      */
     private String safeguardString(String value) {
         return value != null ? value : "";
+    }
+    
+    /**
+     * 创建S3上传Bean对象
+     */
+    private BaseUploadBean createS3UploadBean(TaskInfo taskInfo, String markdownContent, String taskKey) {
+        BaseUploadBean uploadBean = new BaseUploadBean();
+        
+        // 设置文件内容
+        uploadBean.fileContent = markdownContent;
+        
+        // 设置源类型 (根据实际需求确定使用哪个类型)
+        uploadBean.type = SourceType.JIRA_IWPB; // 可根据实际情况调整
+        
+        // 设置附件相关属性
+        uploadBean.isAttachment = false;
+        uploadBean.attachmentPath = null;
+        
+        // 创建元数据
+        S3FileMetaData metaData = new S3FileMetaData();
+        String recordId = UUID.randomUUID().toString();
+        String fileName = recordId + ".md";
+        
+        metaData.setFileName(fileName);
+        metaData.setFileRecordId(recordId);
+        metaData.setTitle(safeguardString(taskInfo.getSummary()));
+        metaData.setSource("jira-iwpb");
+        metaData.setOriginalPath("jira/" + taskKey + "/" + fileName);
+        metaData.setOwner("");
+        metaData.setCategories("");
+        metaData.setValueStream("");
+        metaData.setLevel(0);
+        metaData.setAttachmentType("file");
+        
+        uploadBean.metaData = metaData;
+        
+        return uploadBean;
+    }
+    
+    /**
+     * 异步推送到S3
+     */
+    @Async
+    public CompletableFuture<Void> asyncPushToS3(List<BaseUploadBean> uploadBeans) {
+        return CompletableFuture.runAsync(() -> {
+            try {
+                log.info("开始异步推送 {} 个任务到S3", uploadBeans.size());
+                s3Service.pushAll(uploadBeans);
+                log.info("成功推送 {} 个任务到S3", uploadBeans.size());
+            } catch (Exception e) {
+                log.error("推送任务到S3失败: {}", e.getMessage(), e);
+            }
+        });
     }
     
     // 数据类定义

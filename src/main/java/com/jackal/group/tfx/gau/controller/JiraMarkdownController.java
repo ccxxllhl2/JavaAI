@@ -2,6 +2,7 @@ package com.jackal.group.tfx.gau.controller;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.JsonNode;
 import com.jackal.group.tfx.gau.service.JiraProcessingService;
 import com.jackal.group.tfx.gau.util.HttpUtil;
 import lombok.Data;
@@ -76,8 +77,10 @@ public class JiraMarkdownController {
                     jqlQuery.setStartAt(0);
                     jqlQuery.setMaxResults(100);
                     jqlQuery.setJql(String.format("(key=\"%s\") and issuetype in (\"W Programme\", Story, Epic)", jiraKey));
+                    jqlQuery.setFields(List.of("summary", "description"));
                     
-                    searchRequest.setJql(objectMapper.writeValueAsString(jqlQuery));
+                    // 直接设置JQL对象，不进行序列化
+                    searchRequest.setJql(jqlQuery);
                     
                     // 调用JiraController的/jira/jql接口
                     String requestBody = objectMapper.writeValueAsString(searchRequest);
@@ -117,6 +120,128 @@ public class JiraMarkdownController {
     }
     
     /**
+     * 查询指定Jira任务的所有子任务信息
+     * 
+     * @param request 包含jira_key、jiraSource和jiraToken的请求对象
+     * @return 包含所有子任务key和summary的列表
+     */
+    @PostMapping(value = "/jira/subInfo", consumes = {"application/json"})
+    public ResponseEntity<List<SubTaskResult>> getSubTaskInfo(@RequestBody JiraSubInfoRequest request) {
+        try {
+            // 参数验证
+            if (request.getJira_key() == null || request.getJira_key().trim().isEmpty()) {
+                return ResponseEntity.status(400).body(null);
+            }
+            
+            if (request.getJiraSource() == null) {
+                return ResponseEntity.status(400).body(null);
+            }
+            
+            if (request.getJiraToken() == null || request.getJiraToken().trim().isEmpty()) {
+                return ResponseEntity.status(400).body(null);
+            }
+            
+            String apiPrefix = getApiPrefix(request.getJiraSource());
+            String jiraKey = request.getJira_key().trim();
+            
+            try {
+                // 构造JQL查询payload
+                JiraSearchRequest searchRequest = new JiraSearchRequest();
+                searchRequest.setApiPrefix(apiPrefix);
+                searchRequest.setApiVersion("2");
+                searchRequest.setToken(request.getJiraToken());
+                
+                // 构造JQL对象 - 查询子任务
+                JiraJqlQuery jqlQuery = new JiraJqlQuery();
+                jqlQuery.setStartAt(0);
+                jqlQuery.setMaxResults(100);
+                jqlQuery.setJql(String.format("(\"Parent Link\"=\"%s\") and issuetype in (\"W Programme\", Story, Epic)", jiraKey));
+                jqlQuery.setFields(List.of("summary"));
+                
+                // 直接设置JQL对象
+                searchRequest.setJql(jqlQuery);
+                
+                // 调用JiraController的/jira/jql接口
+                String requestBody = objectMapper.writeValueAsString(searchRequest);
+                ResponseEntity response = jiraController.searchJira(requestBody, false, false);
+                
+                if (response.getStatusCode().is2xxSuccessful() && response.getBody() != null) {
+                    String jsonResponse = response.getBody().toString();
+                    
+                    // 解析响应，提取子任务信息
+                    List<SubTaskResult> subTasks = extractSubTaskInfo(jsonResponse);
+                    
+                    log.info("成功查询到任务 {} 的 {} 个子任务", jiraKey, subTasks.size());
+                    return ResponseEntity.ok(subTasks);
+                    
+                } else {
+                    log.warn("查询任务 {} 的子任务失败，状态码: {}", jiraKey, response.getStatusCode());
+                    return ResponseEntity.status(response.getStatusCode()).body(null);
+                }
+                
+            } catch (Exception e) {
+                log.error("处理任务 {} 的子任务查询时发生异常: {}", jiraKey, e.getMessage(), e);
+                return ResponseEntity.status(500).body(null);
+            }
+            
+        } catch (Exception e) {
+            log.error("查询子任务信息失败: {}", e.getMessage(), e);
+            return ResponseEntity.status(500).body(null);
+        }
+    }
+    
+    /**
+     * 从Jira API响应中提取子任务信息
+     * 
+     * @param jsonResponse Jira API响应
+     * @return 子任务信息列表
+     */
+    private List<SubTaskResult> extractSubTaskInfo(String jsonResponse) {
+        List<SubTaskResult> subTasks = new ArrayList<>();
+        
+        try {
+            JsonNode rootNode = objectMapper.readTree(jsonResponse);
+            JsonNode issuesNode = rootNode.get("issues");
+            
+            if (issuesNode != null && issuesNode.isArray()) {
+                for (JsonNode issue : issuesNode) {
+                    if (issue != null && !issue.isNull()) {
+                        SubTaskResult subTask = new SubTaskResult();
+                        
+                        // 提取key
+                        JsonNode keyNode = issue.get("key");
+                        if (keyNode != null && !keyNode.isNull()) {
+                            subTask.setKey(keyNode.asText(""));
+                        } else {
+                            subTask.setKey("");
+                        }
+                        
+                        // 提取summary
+                        JsonNode fieldsNode = issue.get("fields");
+                        if (fieldsNode != null && !fieldsNode.isNull()) {
+                            JsonNode summaryNode = fieldsNode.get("summary");
+                            if (summaryNode != null && !summaryNode.isNull()) {
+                                subTask.setSummary(summaryNode.asText(""));
+                            } else {
+                                subTask.setSummary("");
+                            }
+                        } else {
+                            subTask.setSummary("");
+                        }
+                        
+                        subTasks.add(subTask);
+                    }
+                }
+            }
+            
+        } catch (Exception e) {
+            log.error("解析子任务信息失败: {}", e.getMessage(), e);
+        }
+        
+        return subTasks;
+    }
+    
+    /**
      * 根据jiraSource获取API前缀
      * 
      * @param jiraSource Jira源
@@ -147,7 +272,7 @@ public class JiraMarkdownController {
         private String apiPrefix;
         private String apiVersion;
         private String token;
-        private String jql;
+        private Object jql;
     }
     
     @Data
@@ -155,6 +280,20 @@ public class JiraMarkdownController {
         private int startAt;
         private int maxResults;
         private String jql;
+        private List<String> fields;
+    }
+    
+    @Data
+    public static class JiraSubInfoRequest {
+        private String jira_key;
+        private JiraSource jiraSource;
+        private String jiraToken;
+    }
+    
+    @Data
+    public static class SubTaskResult {
+        private String key;
+        private String summary;
     }
     
     public enum JiraSource {

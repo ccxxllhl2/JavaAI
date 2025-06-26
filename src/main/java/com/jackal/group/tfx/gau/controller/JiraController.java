@@ -39,20 +39,7 @@ public class JiraController {
             var cacheKey = CacheUtil.checksum(rawKey) + "." + rawKey.length();
             if (useCache != null && useCache) {
                 var cachedResult = cacheEventService.tryCache(cacheKey);
-                if (StringUtils.isNotBlank(cachedResult)) {
-                    // 如果缓存结果存在且需要转换为Markdown
-                    if (toMarkdown != null && toMarkdown) {
-                        try {
-                            String markdownContent = jiraProcessingService.convertToMarkdown(cachedResult);
-                            if (markdownContent != null) {
-                                return ResponseEntity.ok(markdownContent);
-                            } else {
-                                log.warn("转换缓存结果为Markdown失败，返回原始JSON");
-                            }
-                        } catch (JsonProcessingException e) {
-                            log.warn("转换缓存结果为Markdown失败，返回原始JSON: {}", e.getMessage());
-                        }
-                    }
+                if (StringUtils.isNotBlank(cachedResult)) {           
                     return ResponseEntity.ok(cachedResult);
                 }
             }
