@@ -644,7 +644,8 @@ public class JiraProcessingService {
             S3FileMetaData metaData = new S3FileMetaData();
             metaData.setLevel(1);
             metaData.setTitle(safeguardString(taskInfo.getSummary()));
-            metaData.setFileName(uuid7 + ".md");
+            metaData.setFileName(taskKey + ".md");
+            metaData.setFileRecordId(uuid7);
             metaData.setTaskKey(taskKey);
             metaData.setStatus(safeguardString(taskInfo.getStatus()));
             metaData.setUpdated(safeguardString(taskInfo.getUpdated()));
@@ -675,7 +676,8 @@ public class JiraProcessingService {
                 S3FileMetaData metadataForMetadata = new S3FileMetaData();
                 metadataForMetadata.setLevel(1);
                 metadataForMetadata.setTitle("Metadata for " + safeguardString(taskInfo.getSummary()));
-                metadataForMetadata.setFileName(uuid7 + ".metadata");
+                metadataForMetadata.setFileName(taskKey + ".metadata");
+                metadataForMetadata.setFileRecordId(uuid7);
                 metadataForMetadata.setTaskKey(taskKey);
                 
                 metadataBean.setMetaData(metadataForMetadata);

@@ -63,8 +63,8 @@ public class JiraMarkdownController {
                 if (jiraKey == null || jiraKey.trim().isEmpty()) {
                     log.warn("跳过空的jiraKey");
                     continue;
-                }
-                
+            }
+            
                 try {
                     // 构造JQL查询payload
                     JiraSearchRequest searchRequest = new JiraSearchRequest();
@@ -88,7 +88,7 @@ public class JiraMarkdownController {
                     
                     if (response.getStatusCode().is2xxSuccessful() && response.getBody() != null) {
                         String jsonResponse = response.getBody().toString();
-                        
+            
                         // 转换为Markdown格式（不包含子任务）
                         String markdownContent = jiraProcessingService.convertToMarkdownWithoutSubTasks(jsonResponse);
                         
@@ -139,8 +139,8 @@ public class JiraMarkdownController {
             
             if (request.getJiraToken() == null || request.getJiraToken().trim().isEmpty()) {
                 return ResponseEntity.status(400).body(null);
-            }
-            
+        }
+        
             String apiPrefix = getApiPrefix(request.getJiraSource());
             String jiraKey = request.getJira_key().trim();
             
@@ -187,9 +187,9 @@ public class JiraMarkdownController {
         } catch (Exception e) {
             log.error("查询子任务信息失败: {}", e.getMessage(), e);
             return ResponseEntity.status(500).body(null);
+            }
         }
-    }
-    
+        
     /**
      * 从Jira API响应中提取子任务信息
      * 
@@ -222,15 +222,15 @@ public class JiraMarkdownController {
                             JsonNode summaryNode = fieldsNode.get("summary");
                             if (summaryNode != null && !summaryNode.isNull()) {
                                 subTask.setSummary(summaryNode.asText(""));
-                            } else {
+                    } else {
                                 subTask.setSummary("");
-                            }
+                    }
                         } else {
                             subTask.setSummary("");
                         }
                         
                         subTasks.add(subTask);
-                    }
+    }
                 }
             }
             
@@ -255,8 +255,8 @@ public class JiraMarkdownController {
                 return "https://alm.jira.com";
             default:
                 throw new IllegalArgumentException("不支持的Jira源: " + jiraSource);
-        }
-    }
+                }
+            }
     
     // 请求和响应数据类
     
